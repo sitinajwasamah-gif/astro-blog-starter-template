@@ -11,7 +11,7 @@ Belajar huruf ABC ialah langkah pertama sebelum anak-anak pandai membaca. Video 
 
 Tekan butang main dan hidupkan bunyi. Setiap huruf disebut, kemudian perkataannya dieja satu per satu: *A untuk Ayam — A, Y, A, M — Ayam!*
 
-<video controls preload="metadata" playsinline style="width: 100%; border-radius: 8px;">
+<video controls preload="metadata" playsinline poster="/videos/thumbnail-belajar-abc.png" style="width: 100%; border-radius: 8px;">
 	<source src="/videos/belajar-abc-kartun.mp4" type="video/mp4" />
 	Pelayar anda tidak menyokong video. <a href="/videos/belajar-abc-kartun.mp4">Muat turun video</a>.
 </video>
