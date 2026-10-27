@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Badang – Animasi</title>
+<style>
+  @font-face { font-family: Fredoka; font-weight: 400; src: url(fonts/fredoka-latin-400-normal.woff2) format("woff2"); }
+  @font-face { font-family: Fredoka; font-weight: 600; src: url(fonts/fredoka-latin-600-normal.woff2) format("woff2"); }
+  @font-face { font-family: Fredoka; font-weight: 700; src: url(fonts/fredoka-latin-700-normal.woff2) format("woff2"); }
+  html, body { margin: 0; background: #111; color: #eee; font-family: Fredoka, sans-serif; }
+  #stage { display: block; width: 1280px; height: 720px; background: #000; }
+  body.preview #stage { width: min(100vw, 1280px); height: auto; aspect-ratio: 16 / 9; margin: 0 auto; }
+  #controls { display: none; gap: 12px; align-items: center; max-width: 1280px; margin: 10px auto; padding: 0 16px; }
+  body.preview #controls { display: flex; }
+  #controls input { flex: 1; }
+  #controls button { font: inherit; padding: 6px 16px; border-radius: 8px; border: 0; background: #ffcf4a; cursor: pointer; }
+  svg text { font-family: Fredoka, sans-serif; }
+</style>
+</head>
+<body>
+<svg id="stage" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg"></svg>
+<div id="controls">
+  <button id="play">▶ Main</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" step="0.1">
+  <span id="clock">0.0s</span>
+</div>
+<script>
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const W = 1280, H = 720;
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, p) => a + (b - a) * p;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+// Like P() but 0 outside [a, b): used for things that should disappear again.
+const B = (t, a, b) => (t < a || t >= b ? 0 : P(t, a, b));
+const ease = p => p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+const easeOut = p => 1 - Math.pow(1 - p, 3);
+const back = p => { const c = 1.9; return 1 + (c + 1) * Math.pow(p - 1, 3) + c * Math.pow(p - 1, 2); };
+const bounce = p => {
+  const n = 7.5625, d = 2.75;
+  if (p < 1 / d) return n * p * p;
+  if (p < 2 / d) return n * (p -= 1.5 / d) * p + 0.75;
+  if (p < 2.5 / d) return n * (p -= 2.25 / d) * p + 0.9375;
+  return n * (p -= 2.625 / d) * p + 0.984375;
+};
+// Deterministic pseudo-random so every render is identical.
+const rnd = i => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+// Natural blinking: closed for ~0.12s every few seconds.
+const blinkAt = (t, seed = 0) => { const c = (t + seed * 1.7) % 3.3; return c < 0.12 ? 1 : 0; };
+const OUT = '#3b2416';
+const g = (inner, tr = '') => `<g${tr ? ` transform="${tr}"` : ''}>${inner}</g>`;
+
+// ---------------------------------------------------------------------------
+// Characters (chibi style: big round heads, big shiny eyes, rosy cheeks)
+// ---------------------------------------------------------------------------
+function eyes(o) {
+  const { blink = 0, look = 0, mood } = o;
+  let s = '';
+  for (const sx of [-1, 1]) {
+    const ex = sx * 22 + look * 5, ey = -155;
+    if (mood === 'happy' || mood === 'eyesclosed' || blink >= 1) {
+      // Closed / smiling eyes drawn as arcs.
+      const d = mood === 'happy' ? `M ${ex - 9} ${ey + 2} Q ${ex} ${ey - 9} ${ex + 9} ${ey + 2}` : `M ${ex - 9} ${ey} Q ${ex} ${ey + 6} ${ex + 9} ${ey}`;
+      s += `<path d="${d}" fill="none" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/>`;
+    } else {
+      const big = mood === 'shock' ? 1.25 : 1;
+      s += `<ellipse cx="${ex}" cy="${ey}" rx="${9 * big}" ry="${12 * big}" fill="#1d120b"/>`;
+      s += `<circle cx="${ex + 3}" cy="${ey - 5}" r="${3.8 * big}" fill="#fff"/><circle cx="${ex - 3}" cy="${ey + 4}" r="${1.8 * big}" fill="#fff"/>`;
+    }
+  }
+  return s;
+}
+function brows(mood) {
+  const m = {
+    angry: [[-32, -178, -12, -170], [12, -170, 32, -178]],
+    worry: [[-32, -170, -12, -177], [12, -177, 32, -170]],
+    shock: [[-32, -182, -12, -184], [12, -184, 32, -182]],
+    strain: [[-32, -176, -12, -170], [12, -170, 32, -176]],
+  }[mood] || [[-31, -176, -13, -178], [13, -178, 31, -176]];
+  return m.map(([a, b, c, d]) => `<path d="M ${a} ${b} L ${c} ${d}" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/>`).join('');
+}
+function mouth(m) {
+  switch (m) {
+    case 'grin': return `<path d="M -17 -133 Q 0 -106 17 -133 Z" fill="#7a2420" stroke="#1d120b" stroke-width="3" stroke-linejoin="round"/><path d="M -9 -119 Q 0 -112 9 -119 Q 0 -124 -9 -119" fill="#ff7b7b"/>`;
+    case 'o': return `<ellipse cx="0" cy="-125" rx="7" ry="9" fill="#7a2420" stroke="#1d120b" stroke-width="3"/>`;
+    case 'shout': return `<ellipse cx="0" cy="-123" rx="13" ry="14" fill="#7a2420" stroke="#1d120b" stroke-width="3"/><ellipse cx="0" cy="-116" rx="7" ry="4" fill="#ff7b7b"/>`;
+    case 'frown': return `<path d="M -11 -121 Q 0 -132 11 -121" fill="none" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/>`;
+    case 'yuck': return `<path d="M -16 -125 q 4 -6 8 0 q 4 6 8 0 q 4 -6 8 0 q 4 6 8 0" fill="none" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/>`;
+    case 'strain': return `<rect x="-14" y="-133" width="28" height="12" rx="5" fill="#fff" stroke="#1d120b" stroke-width="3"/><path d="M -14 -127 H 14" stroke="#1d120b" stroke-width="2"/>`;
+    case 'chew': return `<path d="M -10 -128 Q 0 -120 10 -128" fill="none" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/><circle cx="-34" cy="-130" r="10" fill="#ffb07a" opacity=".9"/>`;
+    case 'flat': return `<path d="M -9 -126 H 9" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/>`;
+    default: return `<path d="M -13 -131 Q 0 -117 13 -131" fill="none" stroke="#1d120b" stroke-width="4" stroke-linecap="round"/>`;
+  }
+}
+function arm(sx, ang, color, skin, len = 52, item = '') {
+  // ang: degrees from hanging straight down, positive swings outward/up.
+  const sxp = sx * 30, syp = -92, a = ang * Math.PI / 180;
+  const hx = sxp + sx * Math.sin(a) * len, hy = syp + Math.cos(a) * len;
+  return `<path d="M ${sxp} ${syp} L ${hx} ${hy}" stroke="${OUT}" stroke-width="21" stroke-linecap="round"/>
+    <path d="M ${sxp} ${syp} L ${sxp + (hx - sxp) * 0.45} ${syp + (hy - syp) * 0.45}" stroke="${color}" stroke-width="16" stroke-linecap="round"/>
+    <path d="M ${sxp + (hx - sxp) * 0.45} ${syp + (hy - syp) * 0.45} L ${hx} ${hy}" stroke="${skin}" stroke-width="16" stroke-linecap="round"/>
+    ${item ? g(item, `translate(${hx} ${hy}) rotate(${sx * ang})`) : ''}
+    <circle cx="${hx}" cy="${hy}" r="10" fill="${skin}" stroke="${OUT}" stroke-width="2.5"/>`;
+}
+const OUTFITS = {
+  hamba:  { shirt: '#d9a05b', sarong: '#8a6a4f', band: '#b8442f', patch: true },
+  hulubalang: { shirt: '#2f6fd0', sarong: '#f2c230', band: '#e23d3d' },
+};
+function person(o) {
+  const {
+    x = 0, y = 0, s = 1, flip = false, skin = '#c98a5a', hair = '#24160e', outfit = 'hamba',
+    mood = 'smile', mouthShape, blink = 0, aL = 12, aR = 12, step = 0, bob = 0, tilt = 0,
+    itemL = '', itemR = '', armLen = 52, glow = 0, hat = 'band', extra = '', stache = false, tint = '', look = 0, squash = 1,
+  } = o;
+  const of = typeof outfit === 'string' ? OUTFITS[outfit] : outfit;
+  const legs = [-1, 1].map(sx => {
+    const k = sx * step * 10;
+    return `<g transform="rotate(${k} ${sx * 13} -22)"><rect x="${sx * 13 - 9}" y="-26" width="18" height="24" rx="8" fill="${skin}" stroke="${OUT}" stroke-width="2.5"/><ellipse cx="${sx * 13 + sx * 3}" cy="-2" rx="13" ry="7" fill="${skin}" stroke="${OUT}" stroke-width="2.5"/></g>`;
+  }).join('');
+  let hatSvg = '';
+  if (hat === 'band') hatSvg = `<path d="M -59 -177 Q 0 -203 59 -177" fill="none" stroke="${OUT}" stroke-width="16" stroke-linecap="round"/><path d="M -59 -177 Q 0 -203 59 -177" fill="none" stroke="${of.band}" stroke-width="11" stroke-linecap="round"/><path d="M 52 -182 q 20 -4 26 10 q -16 2 -22 -4 M 52 -180 q 16 6 14 22 q -12 -8 -12 -16" fill="${of.band}" stroke="${OUT}" stroke-width="2.5"/>`;
+  if (hat === 'songkok') hatSvg = `<path d="M -46 -196 L -42 -228 Q 0 -238 42 -228 L 46 -196 Q 0 -206 -46 -196 Z" fill="#1c1c24" stroke="${OUT}" stroke-width="2.5"/>`;
+  if (hat === 'crown') hatSvg = `<path d="M -50 -196 Q 0 -212 50 -196 L 54 -226 L 32 -212 L 16 -240 L 0 -214 L -16 -240 L -32 -212 L -54 -226 Z" fill="#f6c638" stroke="${OUT}" stroke-width="2.5" stroke-linejoin="round"/><circle cx="0" cy="-205" r="6" fill="#e2374a"/><circle cx="-30" cy="-202" r="4" fill="#3aa3e8"/><circle cx="30" cy="-202" r="4" fill="#3aa3e8"/>`;
+  if (hat === 'turban') hatSvg = `<path d="M -62 -180 Q -66 -238 0 -240 Q 66 -238 62 -180 Q 0 -200 -62 -180 Z" fill="#8e44c9" stroke="${OUT}" stroke-width="2.5"/><path d="M -56 -200 Q 0 -222 56 -200 M -50 -220 Q 0 -238 50 -220" stroke="#b77be6" stroke-width="5" fill="none"/><circle cx="0" cy="-206" r="8" fill="#f6c638" stroke="${OUT}" stroke-width="2"/><path d="M 0 -214 q 8 -22 -4 -34" stroke="#fff" stroke-width="5" fill="none" stroke-linecap="round"/>`;
+  const body = `
+    ${legs}
+    <path d="M -36 -60 L -40 -20 Q 0 -12 40 -20 L 36 -60 Z" fill="${of.sarong}" stroke="${OUT}" stroke-width="2.5" stroke-linejoin="round"/>
+    <path d="M -38 -42 L 38 -42 M -39 -32 L 39 -32" stroke="rgba(255,255,255,.25)" stroke-width="3"/>
+    ${arm(-1, aL, of.shirt, skin, armLen, itemL)}
+    <rect x="-36" y="-104" width="72" height="54" rx="22" fill="${of.shirt}" stroke="${OUT}" stroke-width="2.5"/>
+    ${of.patch ? '<rect x="8" y="-86" width="14" height="12" rx="2" fill="#b98545" stroke="#7b5530" stroke-width="2" stroke-dasharray="3 2"/>' : ''}
+    ${outfit === 'hulubalang' ? '<path d="M -36 -64 Q 0 -54 36 -64 L 34 -50 Q 0 -42 -34 -50 Z" fill="#f2c230" stroke="' + OUT + '" stroke-width="2"/><path d="M -8 -104 L 0 -90 L 8 -104" fill="none" stroke="#f2c230" stroke-width="4"/>' : ''}
+    ${arm(1, aR, of.shirt, skin, armLen, itemR)}
+  `;
+  const head = `
+    <circle cx="-60" cy="-156" r="11" fill="${skin}" stroke="${OUT}" stroke-width="2.5"/>
+    <circle cx="60" cy="-156" r="11" fill="${skin}" stroke="${OUT}" stroke-width="2.5"/>
+    <circle cx="0" cy="-158" r="61" fill="${skin}" stroke="${OUT}" stroke-width="3"/>
+    ${tint ? `<circle cx="0" cy="-158" r="59" fill="${tint}" opacity=".45"/>` : ''}
+    <path d="M -61 -160 Q -66 -224 0 -224 Q 66 -224 61 -160 Q 52 -190 22 -192 Q 26 -182 14 -176 Q 8 -190 -12 -192 Q -12 -180 -26 -176 Q -36 -190 -61 -160 Z" fill="${hair}"/>
+    ${eyes({ blink, look, mood })}
+    ${brows(mood)}
+    <ellipse cx="-37" cy="-133" rx="10" ry="6.5" fill="#ff7f95" opacity=".55"/>
+    <ellipse cx="37" cy="-133" rx="10" ry="6.5" fill="#ff7f95" opacity=".55"/>
+    <path d="M -3 -142 Q 0 -138 3 -142" fill="none" stroke="#8a4f2f" stroke-width="3" stroke-linecap="round"/>
+    ${stache ? '<path d="M -26 -134 Q -12 -146 0 -138 Q 12 -146 26 -134 Q 14 -138 0 -132 Q -14 -138 -26 -134 Z" fill="#1d120b"/>' : ''}
+    ${mouth(mouthShape || ({ happy: 'grin', shock: 'o', angry: 'frown', worry: 'frown', strain: 'strain' }[mood] || 'smile'))}
+    ${hatSvg}
+  `;
+  const aura = glow > 0 ? `<ellipse cx="0" cy="-110" rx="${110 + 10 * Math.sin(glow * 20)}" ry="${150 + 10 * Math.sin(glow * 20)}" fill="url(#auraGrad)" opacity="${clamp(glow)}"/>` : '';
+  return g(`${aura}<ellipse cx="0" cy="2" rx="46" ry="9" fill="rgba(0,0,0,.18)"/>` +
+    g(body + g(head, `rotate(${tilt} 0 -110)`) + extra, `translate(0 ${-bob}) scale(${1 / squash} ${squash})`),
+    `translate(${x} ${y}) scale(${flip ? -s : s} ${s})`);
+}
+
+function jin(o) {
+  const { x = 0, y = 0, s = 1, flip = false, mood = 'smile', blink = 0, aL = 30, aR = 30, t = 0, beard = 0, mouthShape, alpha = 1 } = o;
+  const sway = Math.sin(t * 3) * 6;
+  const arms = [-1, 1].map(sx => {
+    const a = (sx < 0 ? aL : aR) * Math.PI / 180, L = 46;
+    const sxp = sx * 40, syp = -96, hx = sxp + sx * Math.sin(a) * L, hy = syp + Math.cos(a) * L;
+    return `<path d="M ${sxp} ${syp} Q ${(sxp + hx) / 2 + sx * 8} ${(syp + hy) / 2 - 8} ${hx} ${hy}" stroke="${OUT}" stroke-width="17" fill="none" stroke-linecap="round"/><path d="M ${sxp} ${syp} Q ${(sxp + hx) / 2 + sx * 8} ${(syp + hy) / 2 - 8} ${hx} ${hy}" stroke="#4cc4c0" stroke-width="12" fill="none" stroke-linecap="round"/><circle cx="${hx}" cy="${hy}" r="9" fill="#4cc4c0" stroke="${OUT}" stroke-width="2.5"/>`;
+  }).join('');
+  const bx = beard * 70; // beard pulled forward
+  return g(`
+    <path d="M -46 -110 C -60 -40 -20 -20 ${-6 + sway} 4 C ${10 + sway} 22 ${-12 + sway} 40 ${-26 + sway} 30 C ${-6 + sway} 56 ${30 + sway} 30 ${22 + sway} 0 C 50 -30 58 -70 46 -110 Z" fill="#4cc4c0" stroke="${OUT}" stroke-width="3"/>
+    <path d="M -26 -96 C -30 -50 -6 -30 4 -14 C 18 -34 30 -60 26 -96 Z" fill="#8ee6dd" opacity=".8"/>
+    ${arms}
+    <path d="M -54 -168 L -86 -190 L -62 -146 Z M 54 -168 L 86 -190 L 62 -146 Z" fill="#4cc4c0" stroke="${OUT}" stroke-width="3" stroke-linejoin="round"/>
+    <circle cx="0" cy="-150" r="60" fill="#4cc4c0" stroke="${OUT}" stroke-width="3"/>
+    <path d="M -30 -204 q -10 -30 8 -42 q -2 22 10 30 q 2 -30 22 -36 q -8 24 4 36 q 10 -16 26 -12 q -18 10 -14 26 Z" fill="#3e9b4f" stroke="${OUT}" stroke-width="2.5" stroke-linejoin="round"/>
+    ${g(eyes({ blink, mood }) + brows(mood), 'translate(0 8)')}
+    <ellipse cx="-38" cy="-130" rx="10" ry="6" fill="#ff7f95" opacity=".5"/><ellipse cx="38" cy="-130" rx="10" ry="6" fill="#ff7f95" opacity=".5"/>
+    <path d="M -34 -114 Q ${-20 + bx * 0.4} ${-40 + Math.abs(bx) * 0.3} ${bx} ${-24 + Math.sin(t * 4) * 3} Q ${20 + bx * 0.4} ${-40 + Math.abs(bx) * 0.3} 34 -114 Q 0 -100 -34 -114 Z" fill="#f4f1ea" stroke="${OUT}" stroke-width="3" stroke-linejoin="round"/>
+    ${g(mouth(mouthShape || ({ shock: 'o', happy: 'grin', worry: 'frown', angry: 'frown' }[mood] || 'smile')), 'translate(0 8) scale(.9)')}
+  `, `translate(${x} ${y}) scale(${flip ? -s : s} ${s})`).replace('<g', `<g opacity="${alpha}"`);
+}
+
+// Extra cast built on person()
+const tuan = o => person({ skin: '#d8a274', outfit: { shirt: '#3f9a5a', sarong: '#6b3f8f', band: '#000' }, hat: 'songkok', stache: true, ...o,
+  extra: '<ellipse cx="0" cy="-70" rx="44" ry="34" fill="#3f9a5a" stroke="' + OUT + '" stroke-width="2.5"/>' });
+const raja = o => person({ skin: '#d9a777', outfit: { shirt: '#f2c230', sarong: '#b02e3a', band: '#000' }, hat: 'crown', stache: true, ...o });
+const nadi = o => person({ skin: '#8d5634', outfit: { shirt: '#c0392b', sarong: '#f3efe2', band: '#000' }, hat: 'turban', stache: true, ...o });
+const villager = (i, o) => person({
+  skin: ['#c98a5a', '#d9a274', '#b87a4b', '#e0b080'][i % 4],
+  outfit: { shirt: ['#e86a92', '#55b5e6', '#9ccc4a', '#f39c3d', '#a678de'][i % 5], sarong: ['#5a4ab0', '#c04848', '#2e8b6e', '#916a3c'][i % 4], band: '#e23d3d' },
+  hat: ['none', 'songkok', 'none', 'band'][i % 4], ...o,
+});
+
+// ---------------------------------------------------------------------------
+// Props & scenery
+// ---------------------------------------------------------------------------
+function sky(top, bottom, id) {
+  return `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${top}"/><stop offset="1" stop-color="${bottom}"/></linearGradient></defs><rect width="${W}" height="${H + 100}" fill="url(#${id})"/>`;
+}
+const DAY = ['#7ed3f7', '#dff5ff'], DUSK = ['#ff9a6b', '#ffe2a8'], NIGHT = ['#14204a', '#3b4f8c'];
+function sun(x, y, r = 48, t = 0) {
+  let rays = '';
+  for (let i = 0; i < 12; i++) { const a = i * 30 + t * 20; rays += `<rect x="-5" y="${-r - 26}" width="10" height="18" rx="5" fill="#ffd54a" transform="rotate(${a})"/>`; }
+  return g(`${rays}<circle r="${r}" fill="#ffd54a" stroke="#f3a72a" stroke-width="4"/><circle cx="-14" cy="-6" r="5" fill="#7a4a12"/><circle cx="14" cy="-6" r="5" fill="#7a4a12"/><path d="M -14 12 Q 0 24 14 12" stroke="#7a4a12" stroke-width="4" fill="none" stroke-linecap="round"/><ellipse cx="-26" cy="8" rx="7" ry="4" fill="#ff8f6b" opacity=".6"/><ellipse cx="26" cy="8" rx="7" ry="4" fill="#ff8f6b" opacity=".6"/>`, `translate(${x} ${y + 45})`);
+}
+function moon(x, y) {
+  return g(`<circle r="62" fill="#fff6c9" opacity=".15"/><circle r="44" fill="#fff4b8"/><circle cx="-14" cy="-10" r="8" fill="#efe19b"/><circle cx="12" cy="14" r="6" fill="#efe19b"/>`, `translate(${x} ${y + 35})`);
+}
+function stars(t, n = 40) {
+  let s = '';
+  for (let i = 0; i < n; i++) { const tw = 0.5 + 0.5 * Math.sin(t * 3 + i); s += `<circle cx="${rnd(i) * W}" cy="${60 + rnd(i + 99) * 330}" r="${1.5 + rnd(i + 7) * 2}" fill="#fff" opacity="${0.4 + tw * 0.6}"/>`; }
+  return s;
+}
+function cloud(x, y, s = 1, op = 1) {
+  return g(`<g opacity="${op}"><ellipse cx="0" cy="0" rx="60" ry="30" fill="#fff"/><circle cx="-28" cy="-14" r="28" fill="#fff"/><circle cx="16" cy="-24" r="34" fill="#fff"/><circle cx="46" cy="-6" r="24" fill="#fff"/></g>`, `translate(${x} ${y}) scale(${s})`);
+}
+function clouds(t, op = 1) {
+  return [0, 1, 2, 3].map(i => cloud(((rnd(i) * W + t * (12 + i * 5)) % (W + 300)) - 150, 110 + rnd(i + 3) * 110, 0.7 + rnd(i + 5) * 0.6, op)).join('');
+}
+function hills(c1 = '#7cc66b', c2 = '#5aae55', yb = 470) {
+  return `<path d="M 0 ${yb - 60} Q 200 ${yb - 170} 420 ${yb - 70} T 860 ${yb - 90} T 1280 ${yb - 80} V 820 H 0 Z" fill="${c1}"/><path d="M 0 ${yb} Q 260 ${yb - 90} 560 ${yb - 20} T 1280 ${yb - 30} V 820 H 0 Z" fill="${c2}"/>`;
+}
+function ground(y = 560, c = '#8bd16f', c2 = '#74bd5b') {
+  return `<rect x="0" y="${y}" width="${W}" height="${H + 100 - y}" fill="${c}"/><path d="M 0 ${y} H ${W}" stroke="${c2}" stroke-width="6"/>` +
+    [...Array(18)].map((_, i) => `<path d="M ${rnd(i + 40) * W} ${y + 30 + rnd(i + 2) * 120} l 6 -14 l 6 14 l 6 -12 l 4 12" stroke="${c2}" stroke-width="4" fill="none" stroke-linecap="round"/>`).join('');
+}
+function river(y, h, t, c = '#4aa8e0', c2 = '#7fcaf2') {
+  let waves = '';
+  for (let i = 0; i < 14; i++) {
+    const wx = ((i * 137 + t * 30) % (W + 120)) - 60, wy = y + 18 + (i % 4) * (h - 30) / 4;
+    waves += `<path d="M ${wx} ${wy} q 12 -8 24 0 q 12 8 24 0" stroke="${c2}" stroke-width="4" fill="none" stroke-linecap="round"/>`;
+  }
+  return `<rect x="0" y="${y}" width="${W}" height="${h + 100}" fill="${c}"/>${waves}<path d="M 0 ${y} H ${W}" stroke="#2f86bd" stroke-width="5"/>`;
+}
+function tree(x, y, s = 1, sway = 0, c = '#3fa34d', c2 = '#2f8a3f') {
+  return g(`<path d="M -14 0 Q -10 -60 -6 -110 L 6 -110 Q 10 -60 14 0 Z" fill="#8a5a33" stroke="${OUT}" stroke-width="3"/>
+    <g transform="rotate(${sway} 0 -110)"><circle cx="-40" cy="-130" r="44" fill="${c2}" stroke="${OUT}" stroke-width="3"/><circle cx="40" cy="-130" r="44" fill="${c2}" stroke="${OUT}" stroke-width="3"/><circle cx="0" cy="-170" r="56" fill="${c}" stroke="${OUT}" stroke-width="3"/><circle cx="-18" cy="-186" r="14" fill="#69c46f" opacity=".7"/></g>`,
+    `translate(${x} ${y}) scale(${s})`);
+}
+function palm(x, y, s = 1, sway = 0) {
+  let fronds = '';
+  for (let i = 0; i < 6; i++) { const a = -150 + i * 40 + sway; fronds += `<path d="M 0 0 Q 50 -30 100 10 Q 50 -10 0 0" fill="#3fae4f" stroke="${OUT}" stroke-width="2.5" transform="rotate(${a})"/>`; }
+  return g(`<path d="M -10 0 Q 10 -110 30 -220 L 44 -218 Q 26 -110 10 0 Z" fill="#b07a45" stroke="${OUT}" stroke-width="3"/>${g(fronds + '<circle cx="-6" cy="12" r="10" fill="#7a4a22"/><circle cx="10" cy="14" r="10" fill="#7a4a22"/>', 'translate(37 -220)')}`, `translate(${x} ${y}) scale(${s})`);
+}
+function bush(x, y, s = 1, c = '#4cb35a') {
+  return g(`<circle cx="-40" cy="-30" r="38" fill="${c}" stroke="${OUT}" stroke-width="3"/><circle cx="40" cy="-30" r="38" fill="${c}" stroke="${OUT}" stroke-width="3"/><circle cx="0" cy="-52" r="46" fill="${c}" stroke="${OUT}" stroke-width="3"/><rect x="-78" y="-30" width="156" height="30" fill="${c}"/><path d="M -78 0 H 78" stroke="${OUT}" stroke-width="3"/>`, `translate(${x} ${y}) scale(${s})`);
+}
+function rumah(x, y, s = 1) {
+  return g(`
+    ${[-110, -40, 40, 110].map(px => `<rect x="${px - 6}" y="-70" width="12" height="70" fill="#7a4a22" stroke="${OUT}" stroke-width="2.5"/>`).join('')}
+    <rect x="-130" y="-190" width="260" height="124" rx="6" fill="#c98f52" stroke="${OUT}" stroke-width="3"/>
+    ${[0, 1, 2, 3, 4, 5].map(i => `<path d="M -130 ${-176 + i * 20} H 130" stroke="#a87038" stroke-width="2"/>`).join('')}
+    <rect x="-96" y="-160" width="46" height="54" rx="4" fill="#5a3518" stroke="${OUT}" stroke-width="3"/><path d="M -73 -160 V -106" stroke="#c98f52" stroke-width="4"/>
+    <rect x="30" y="-170" width="56" height="104" rx="4" fill="#5a3518" stroke="${OUT}" stroke-width="3"/>
+    <path d="M -160 -186 L 0 -300 L 160 -186 Z" fill="#9b6a3a" stroke="${OUT}" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M -120 -214 L 120 -214 M -80 -242 L 80 -242 M -40 -270 L 40 -270" stroke="#7d5129" stroke-width="3"/>
+    <path d="M 40 0 L 56 -66 M 70 0 L 86 -66 M 44 -16 L 74 -16 M 48 -32 L 78 -32 M 52 -48 L 82 -48" stroke="#7a4a22" stroke-width="5"/>
+  `, `translate(${x} ${y}) scale(${s})`);
+}
+function istana(x, y, s = 1) {
+  const roof = (w, yy, h, c) => `<path d="M ${-w} ${yy} L ${-w + 30} ${yy - h} L ${w - 30} ${yy - h} L ${w} ${yy} Z" fill="${c}" stroke="${OUT}" stroke-width="3" stroke-linejoin="round"/><path d="M ${-w} ${yy} q -14 -6 -18 -22 M ${w} ${yy} q 14 -6 18 -22" stroke="#f6c638" stroke-width="5" fill="none" stroke-linecap="round"/>`;
+  return g(`
+    <rect x="-340" y="-40" width="680" height="40" fill="#b9874f" stroke="${OUT}" stroke-width="3"/>
+    ${[-300, -200, -100, 0, 100, 200, 300].map(px => `<rect x="${px - 8}" y="-40" width="16" height="40" fill="#7a4a22"/>`).join('')}
+    <rect x="-300" y="-210" width="600" height="170" fill="#f0d9a8" stroke="${OUT}" stroke-width="3"/>
+    ${[-240, -140, 140, 240].map(px => `<rect x="${px - 26}" y="-170" width="52" height="80" rx="26" fill="#7a3b1e" stroke="${OUT}" stroke-width="3"/>`).join('')}
+    <rect x="-60" y="-190" width="120" height="150" rx="10" fill="#7a3b1e" stroke="${OUT}" stroke-width="3"/>
+    <path d="M -300 -86 H 300" stroke="#f6c638" stroke-width="8"/>
+    ${roof(340, -206, 70, '#b5452e')}${roof(240, -276, 70, '#c95637')}${roof(140, -346, 64, '#b5452e')}
+    <path d="M 0 -410 L 0 -446" stroke="${OUT}" stroke-width="4"/><path d="M 0 -446 L 40 -436 L 0 -426 Z" fill="#f6c638" stroke="${OUT}" stroke-width="2"/>
+  `, `translate(${x} ${y}) scale(${s})`);
+}
+function lukah(x, y, s = 1, rot = 0) {
+  let weave = '';
+  for (let i = 0; i < 6; i++) weave += `<path d="M ${-40 + i * 16} -26 L ${-30 + i * 12} 26" stroke="#8a5a2b" stroke-width="2.5"/>`;
+  return g(`<path d="M -50 -30 Q -60 0 -50 30 L 50 12 Q 58 0 50 -12 Z" fill="#d9a85f" stroke="${OUT}" stroke-width="3" stroke-linejoin="round"/>${weave}<path d="M -46 -10 L 46 -4 M -46 10 L 46 4" stroke="#8a5a2b" stroke-width="2.5"/><ellipse cx="-50" cy="0" rx="10" ry="30" fill="#b07f3c" stroke="${OUT}" stroke-width="3"/><ellipse cx="-50" cy="0" rx="5" ry="16" fill="#5a3a18"/>`, `translate(${x} ${y}) rotate(${rot}) scale(${s})`);
+}
+function fish(x, y, s = 1, c = '#ff9a3c', flip = false, wig = 0) {
+  return g(`<path d="M 24 0 L 44 ${-14 + wig} L 44 ${14 + wig} Z" fill="${c}" stroke="${OUT}" stroke-width="2.5" stroke-linejoin="round"/><ellipse cx="0" cy="0" rx="30" ry="17" fill="${c}" stroke="${OUT}" stroke-width="2.5"/><circle cx="-14" cy="-4" r="4" fill="#1d120b"/><circle cx="-13" cy="-5" r="1.5" fill="#fff"/><path d="M 0 -10 Q 6 0 0 10" stroke="${OUT}" stroke-width="2" fill="none"/>`, `translate(${x} ${y}) scale(${flip ? -s : s} ${s})`);
+}
+function bones(x, y, s = 1, rot = 0) {
+  return g(`<path d="M -30 0 H 30" stroke="#f4f1ea" stroke-width="5" stroke-linecap="round"/>${[-18, -6, 6, 18].map(px => `<path d="M ${px} -14 L ${px} 14" stroke="#f4f1ea" stroke-width="4" stroke-linecap="round"/>`).join('')}<path d="M 30 0 L 44 -12 M 30 0 L 44 12" stroke="#f4f1ea" stroke-width="4" stroke-linecap="round"/><circle cx="-36" cy="0" r="10" fill="#f4f1ea"/><circle cx="-38" cy="-2" r="3" fill="#555"/>`, `translate(${x} ${y}) rotate(${rot}) scale(${s})`);
+}
+function boulder(x, y, s = 1, rot = 0) {
+  return g(`<path d="M -110 0 Q -130 -70 -70 -110 Q 0 -150 70 -116 Q 130 -80 116 -10 Q 110 10 0 12 Q -100 12 -110 0 Z" fill="#9aa2ab" stroke="${OUT}" stroke-width="4"/><path d="M -70 -90 Q -30 -116 20 -110" stroke="#c6ccd2" stroke-width="10" fill="none" stroke-linecap="round"/><circle cx="40" cy="-40" r="14" fill="#7f8891"/><circle cx="-40" cy="-30" r="9" fill="#7f8891"/><circle cx="70" cy="-80" r="7" fill="#7f8891"/>`, `translate(${x} ${y}) rotate(${rot}) scale(${s})`);
+}
+function ship(x, y, s = 1, t = 0) {
+  const rock = Math.sin(t * 2) * 2;
+  return g(`
+    <path d="M -230 -40 L 230 -40 Q 210 30 150 40 L -160 40 Q -220 20 -230 -40 Z" fill="#8a4f24" stroke="${OUT}" stroke-width="4"/>
+    <path d="M -224 -20 H 224" stroke="#f6c638" stroke-width="6"/>
+    <path d="M -40 -40 V -300 M 90 -40 V -250" stroke="#5a3518" stroke-width="10"/>
+    <path d="M -40 -290 Q 40 -200 -40 -80 Q -150 -180 -40 -290 Z" fill="#e5533d" stroke="${OUT}" stroke-width="3"/>
+    <path d="M 90 -240 Q 150 -170 90 -80 Q 10 -160 90 -240 Z" fill="#f39c3d" stroke="${OUT}" stroke-width="3"/>
+    <path d="M -40 -300 L -4 -290 L -40 -278 Z" fill="#8e44c9"/>
+  `, `translate(${x} ${y}) rotate(${rock}) scale(${s})`);
+}
+function sea(y, t) { return river(y, H - y, t, '#2f8fd6', '#79c3f2'); }
+function sparkle(x, y, r = 14, c = '#fff59a') {
+  return `<path d="M ${x} ${y - r} Q ${x + r * 0.2} ${y - r * 0.2} ${x + r} ${y} Q ${x + r * 0.2} ${y + r * 0.2} ${x} ${y + r} Q ${x - r * 0.2} ${y + r * 0.2} ${x - r} ${y} Q ${x - r * 0.2} ${y - r * 0.2} ${x} ${y - r} Z" fill="${c}"/>`;
+}
+function sparkles(cx, cy, t, n = 10, rad = 140, seed = 0) {
+  let s = '';
+  for (let i = 0; i < n; i++) {
+    const a = i / n * Math.PI * 2 + t * 1.5, ph = (t * 1.3 + rnd(i + seed)) % 1;
+    s += sparkle(cx + Math.cos(a) * rad * (0.6 + ph * 0.5), cy + Math.sin(a) * rad * 0.8 * (0.6 + ph * 0.5), 6 + 10 * Math.sin(ph * Math.PI), i % 2 ? '#fff59a' : '#ffffff');
+  }
+  return s;
+}
+function puff(x, y, p, n = 6) {
+  if (p <= 0 || p >= 1) return '';
+  let s = '';
+  for (let i = 0; i < n; i++) { const a = Math.PI + (i / (n - 1)) * Math.PI; s += `<circle cx="${x + Math.cos(a) * 70 * p}" cy="${y + Math.sin(a) * 30 * p}" r="${22 * (1 - p) + 6}" fill="#e9dcc6" opacity="${1 - p}"/>`; }
+  return s;
+}
+function splash(x, y, p, s = 1) {
+  if (p <= 0 || p >= 1) return '';
+  let d = '';
+  for (let i = 0; i < 9; i++) { const a = -Math.PI * (0.1 + 0.8 * i / 8), r = 120 * s * easeOut(p); d += `<circle cx="${x + Math.cos(a) * r}" cy="${y + Math.sin(a) * r + 160 * s * p * p}" r="${12 * s * (1 - p) + 3}" fill="#bfe6ff"/>`; }
+  return d + `<ellipse cx="${x}" cy="${y}" rx="${80 * s * easeOut(p)}" ry="${18 * s * easeOut(p)}" fill="none" stroke="#e6f6ff" stroke-width="${6 * (1 - p) + 1}"/>`;
+}
+function mark(x, y, ch, p, c = '#ff4d4d') {
+  if (p <= 0) return '';
+  const sc = back(clamp(p * 3));
+  return g(`<text x="0" y="0" text-anchor="middle" font-size="70" font-weight="700" fill="${c}" stroke="#fff" stroke-width="8" paint-order="stroke">${ch}</text>`, `translate(${x} ${y}) scale(${sc})`);
+}
+function sweat(x, y, t) {
+  const p = (t * 1.5) % 1;
+  return `<path d="M ${x} ${y + p * 30} q -8 12 0 18 q 8 -6 0 -18 Z" fill="#8fd3ff" stroke="#3e8fc7" stroke-width="2" opacity="${1 - p}"/>`;
+}
+function speedLines(t, op = 1) {
+  let s = '';
+  for (let i = 0; i < 24; i++) { const y = rnd(i) * H, x = ((rnd(i + 5) * W - t * 2400) % (W + 400) + W + 400) % (W + 400) - 200; s += `<path d="M ${x} ${y} h ${120 + rnd(i + 9) * 200}" stroke="#fff" stroke-width="${3 + rnd(i) * 4}" stroke-linecap="round" opacity="${0.6 * op}"/>`; }
+  return s;
+}
+function confetti(t, n = 60) {
+  let s = '';
+  const cols = ['#ff5a7a', '#ffd54a', '#4cc4c0', '#7d6bff', '#7ad16a'];
+  for (let i = 0; i < n; i++) {
+    const x = rnd(i) * W + Math.sin(t * 2 + i) * 30, y = ((rnd(i + 50) * H + t * (120 + rnd(i + 3) * 120)) % (H + 40)) - 20;
+    s += `<rect x="-6" y="-3" width="12" height="7" rx="2" fill="${cols[i % 5]}" transform="translate(${x} ${y}) rotate(${t * 200 + i * 37})"/>`;
+  }
+  return s;
+}
+
+// Text: bottom caption bar + speech bubbles
+const wrap = (txt, max) => {
+  const out = []; let line = '';
+  for (const w of txt.split(' ')) { if ((line + ' ' + w).trim().length > max) { out.push(line.trim()); line = w; } else line += ' ' + w; }
+  if (line.trim()) out.push(line.trim());
+  return out;
+};
+function caption(txt, p) {
+  if (!txt || p <= 0) return '';
+  const lines = wrap(txt, 66), lh = 36, h = lines.length * lh + 24, y0 = 720 - h - 16;
+  const op = clamp(p * 4), dy = (1 - easeOut(clamp(p * 4))) * 20;
+  return g(`<rect x="110" y="${y0}" width="${W - 220}" height="${h}" rx="22" fill="rgba(255,255,255,.93)" stroke="#3b2416" stroke-width="4"/>` +
+    lines.map((l, i) => `<text x="${W / 2}" y="${y0 + 42 + i * lh}" text-anchor="middle" font-size="28" font-weight="600" fill="#3b2416">${l}</text>`).join(''),
+    `translate(0 ${dy})`).replace('<g', `<g opacity="${op}"`);
+}
+function bubble(x, y, txt, p, tail = 'down-left', c = '#fff') {
+  if (p <= 0) return '';
+  const lines = wrap(txt, 22), fs = 28, w = Math.max(...lines.map(l => l.length)) * fs * 0.55 + 48, h = lines.length * 36 + 30;
+  const sc = back(clamp(p * 3.5));
+  const tx = tail.includes('left') ? -w / 2 + 40 : w / 2 - 40;
+  const tl = tail.includes('left') ? `M ${tx} ${h / 2 - 4} L ${tx - 26} ${h / 2 + 34} L ${tx + 24} ${h / 2 - 4}` : `M ${tx} ${h / 2 - 4} L ${tx + 26} ${h / 2 + 34} L ${tx - 24} ${h / 2 - 4}`;
+  return g(`<path d="${tl}" fill="${c}" stroke="#3b2416" stroke-width="4" stroke-linejoin="round"/><rect x="${-w / 2}" y="${-h / 2}" width="${w}" height="${h}" rx="26" fill="${c}" stroke="#3b2416" stroke-width="4"/><path d="${tl}" fill="${c}" transform="translate(0 -5)"/>` +
+    lines.map((l, i) => `<text x="0" y="${-h / 2 + 42 + i * 36}" text-anchor="middle" font-size="${fs}" font-weight="600" fill="#3b2416">${l}</text>`).join(''),
+    `translate(${x} ${y}) scale(${sc})`);
+}
+
+// ---------------------------------------------------------------------------
+// Scenes. Each draw(t) gets local time in seconds.
+// ---------------------------------------------------------------------------
+const SFX = []; // [time, name] collected for the audio mixer
+const scenes = [];
+// lift: how far the scene is raised so characters stay clear of the caption bar.
+function scene(dur, captions, draw, sfx = [], lift = 60) { scenes.push({ dur, captions, draw, sfx, lift }); }
+const chopArm = t => 40 + 110 * Math.abs(Math.sin(t * 4));
+const parang = '<g transform="rotate(180)"><rect x="-4" y="-6" width="8" height="18" rx="3" fill="#5a3518"/><path d="M -5 10 L -8 60 Q 0 70 10 56 L 6 10 Z" fill="#dfe6ec" stroke="' + OUT + '" stroke-width="2.5"/></g>';
+
+// 1. Title
+scene(7, [], t => {
+  let s = sky(...DAY, 'sk1') + sun(1110, 110, 48, t) + clouds(t) + hills() + river(560, 160, t) + palm(110, 560, 1, Math.sin(t) * 4) + palm(1180, 570, 0.9, Math.sin(t + 1) * 4);
+  const title = 'BADANG';
+  [...title].forEach((ch, i) => {
+    const p = P(t, 0.3 + i * 0.15, 1.1 + i * 0.15), yy = lerp(-120, 250, bounce(p));
+    s += `<text x="${330 + i * 124}" y="${yy}" text-anchor="middle" font-size="150" font-weight="700" fill="${['#ff5a5a', '#ffb23f', '#ffd93d', '#5ccf6a', '#3fb6ff', '#a07bff'][i]}" stroke="#3b2416" stroke-width="12" paint-order="stroke" transform="rotate(${Math.sin(t * 2 + i) * 3} ${330 + i * 124} ${yy - 50})">${ch}</text>`;
+  });
+  const sp = P(t, 1.8, 2.4);
+  s += `<g opacity="${sp}"><rect x="390" y="${290 + (1 - sp) * 20}" width="500" height="64" rx="32" fill="#fff" stroke="#3b2416" stroke-width="5"/><text x="640" y="${334 + (1 - sp) * 20}" text-anchor="middle" font-size="36" font-weight="600" fill="#3b2416">Si Perkasa dari Sayong</text></g>`;
+  const bp = back(P(t, 2.6, 3.3));
+  s += person({ x: 640, y: 560 + (1 - bp) * 260, s: 0.95, outfit: 'hulubalang', mood: 'happy', aL: 150 + Math.sin(t * 6) * 10, aR: 150 - Math.sin(t * 6) * 10, bob: Math.abs(Math.sin(t * 5)) * 8 });
+  s += sparkles(640, 420, t, 10, 170);
+  return s;
+}, [[0.3, 'pop'], [0.45, 'pop'], [0.6, 'pop'], [0.75, 'pop'], [0.9, 'pop'], [1.05, 'pop'], [1.8, 'chime'], [2.7, 'boing']], 0);
+
+// 2. Badang the slave at work
+scene(10, [[0, 5, 'Pada zaman dahulu, di Sayong, Johor, tinggal seorang hamba bernama Badang.'], [5, 10, 'Setiap hari, Badang bekerja keras menebas hutan untuk tuannya.']], t => {
+  let s = sky(...DAY, 'sk2') + sun(1150, 100, 40, t) + clouds(t) + hills('#86cf73', '#68b85e', 460) + ground(540);
+  s += rumah(240, 560, 0.95);
+  for (let i = 0; i < 4; i++) s += tree(820 + i * 130, 560 - (i % 2) * 10, 0.85 + (i % 2) * 0.15, Math.sin(t * 1.5 + i) * 2);
+  s += bush(760, 580, 0.8);
+  s += tuan({ x: 430, y: 600, s: 0.85, mood: 'angry', aR: 100 + Math.sin(t * 3) * 6, aL: 20, blink: blinkAt(t, 1) });
+  const chop = chopArm(t);
+  s += person({ x: 680, y: 620, s: 0.95, flip: false, mood: t > 5 ? 'worry' : 'smile', aR: chop, aL: 30, itemR: parang, blink: blinkAt(t), bob: Math.abs(Math.sin(t * 4)) * 4 });
+  s += sweat(640, 440, t) + sweat(730, 455, t + 0.4);
+  if (Math.sin(t * 4) > 0.9) s += `<g opacity=".8">${sparkle(770, 560, 12, '#fff')}</g>`;
+  return s;
+}, [[1.2, 'chop'], [1.97, 'chop'], [2.75, 'chop'], [3.54, 'chop'], [4.3, 'chop'], [5.1, 'chop'], [5.9, 'chop'], [6.7, 'chop'], [7.45, 'chop'], [8.25, 'chop']]);
+
+// 3. Setting the fish trap
+scene(9, [[0, 5, 'Untuk mendapatkan makanan, Badang memasang lukah di sungai.']], t => {
+  let s = sky(...DUSK, 'sk3') + sun(1060, 300, 54, t) + clouds(t, 0.8) + hills('#79b86a', '#5f9f57', 420);
+  s += river(470, 250, t, '#3f97d0', '#78c2ee');
+  s += `<path d="M 0 470 Q 240 450 420 480 L 420 820 L 0 820 Z" fill="#8bd16f" stroke="#5f9f57" stroke-width="5"/>`;
+  s += palm(90, 520, 0.9, Math.sin(t) * 3);
+  const walk = P(t, 0, 2.6), bx = lerp(-80, 330, walk);
+  const placing = P(t, 2.8, 4);
+  const lx = lerp(bx + 60, 560, ease(placing)), ly = lerp(560 - 120, 560, ease(placing));
+  for (let i = 0; i < 3; i++) s += fish(((700 + i * 180 - t * 40 * (i % 2 ? -1 : 1)) % 900 + 900) % 900 + 380, 600 + i * 30, 0.7, ['#ff9a3c', '#ffd54a', '#ff6b6b'][i], i % 2 === 1, Math.sin(t * 8 + i) * 4);
+  s += lukah(lx, ly, 0.9, lerp(0, -10, placing));
+  s += `<path d="M 470 ${ly - 20} Q 520 ${ly - 30} ${lx - 30} ${ly}" stroke="#7a4a22" stroke-width="3" fill="none" opacity="${placing}"/>`;
+  s += person({ x: bx, y: 600, s: 0.9, mood: t > 4 ? 'happy' : 'smile', step: walk < 1 ? Math.sin(t * 10) : 0, bob: walk < 1 ? Math.abs(Math.sin(t * 10)) * 6 : 0, aR: walk < 1 ? 70 : lerp(70, 40, placing), aL: 20 + (walk < 1 ? Math.sin(t * 10) * 15 : 0), blink: blinkAt(t) });
+  s += splash(560, 560, P(t, 3.8, 4.6), 0.6);
+  s += bubble(bx + 150, 330, 'Esok pagi, pasti banyak ikan!', B(t, 5, 9), 'down-left');
+  return s;
+}, [[0.2, 'step'], [3.9, 'splash']]);
+
+// 4. Empty trap
+scene(8, [[0, 4.5, 'Tetapi keesokan paginya, lukah itu kosong! Hanya tinggal tulang ikan.']], t => {
+  let s = sky('#9fdcff', '#fff3d1', 'sk4') + sun(220, lerp(260, 140, P(t, 0, 3)), 46, t) + clouds(t) + hills('#79b86a', '#5f9f57', 420);
+  s += river(470, 250, t, '#3f97d0', '#78c2ee');
+  s += `<path d="M 0 470 Q 240 450 420 480 L 420 820 L 0 820 Z" fill="#8bd16f" stroke="#5f9f57" stroke-width="5"/>`;
+  const pull = P(t, 0.6, 1.8), lx = lerp(560, 470, ease(pull)), ly = lerp(560, 420, ease(pull));
+  s += lukah(lx, ly, 0.9, lerp(-10, 20, pull));
+  for (let i = 0; i < 3; i++) {
+    const bp = P(t, 1.9 + i * 0.25, 2.8 + i * 0.25);
+    if (bp > 0) s += bones(lx - 40 - i * 30, lerp(ly + 10, 610 + i * 12, bounce(bp)), 0.6, i * 40 + bp * 120);
+  }
+  const shocked = t > 2.4;
+  s += person({ x: 330, y: 600, s: 0.9, mood: shocked ? 'shock' : 'smile', aR: lerp(30, 70, pull), aL: shocked ? 150 : 20, blink: shocked ? 0 : blinkAt(t), tilt: shocked ? Math.sin(t * 20) * 2 : 0 });
+  s += mark(400, 380, '?', P(t, 2.6, 5));
+  s += mark(440, 360, '!', P(t, 2.4, 5), '#ffb23f');
+  s += bubble(560, 300, 'Siapa yang curi ikan aku?!', B(t, 4.6, 8), 'down-left');
+  return s;
+}, [[0.7, 'splash'], [2.0, 'clack'], [2.25, 'clack'], [2.5, 'clack'], [2.6, 'boing']]);
+
+// 5. Night: the water spirit appears
+scene(11, [[0, 4, 'Malam itu, Badang bersembunyi di sebalik semak untuk mengintai.'], [4, 11, 'Tiba-tiba, muncul hantu air dari dalam sungai. Rupa-rupanya dialah pencuri ikan itu!']], t => {
+  let s = sky(...NIGHT, 'sk5') + stars(t) + moon(1080, 110) + hills('#2d5a4a', '#244a3d', 420);
+  s += river(470, 250, t, '#21507f', '#3f78ad');
+  s += `<path d="M 0 470 Q 240 450 420 480 L 420 820 L 0 820 Z" fill="#2f6b45" stroke="#244a3d" stroke-width="5"/>`;
+  s += lukah(560, 560, 0.9, -10);
+  const rise = P(t, 4, 6);
+  for (let i = 0; i < 6; i++) { const bp = (t * 1.2 + i / 6) % 1; if (t > 3 && t < 6.5) s += `<circle cx="${740 + Math.sin(i * 3) * 40}" cy="${640 - bp * 120}" r="${4 + i % 3 * 3}" fill="none" stroke="#a9dcff" stroke-width="3" opacity="${1 - bp}"/>`; }
+  s += `<clipPath id="above"><rect x="0" y="0" width="${W}" height="600"/></clipPath>`;
+  const munch = t > 6.8 && t < 10;
+  s += `<g clip-path="url(#above)">${jin({ x: 760, y: lerp(820, 600, easeOut(rise)) + Math.sin(t * 2) * 6, s: 0.95, t, mood: munch ? 'happy' : 'smile', mouthShape: munch ? 'chew' : undefined, blink: blinkAt(t, 2), aL: munch ? 150 : 40, aR: 40 })}</g>`;
+  s += splash(760, 600, P(t, 4.2, 5.2), 0.8);
+  // fish travels from trap to the spirit's hand
+  const fp = P(t, 6, 6.8);
+  if (t > 6 && t < 9.5) s += fish(lerp(560, 712, ease(fp)), lerp(560, 400, ease(fp)) - Math.sin(fp * Math.PI) * 80, 0.6 * (t > 8 ? 1 - P(t, 8, 9.5) : 1), '#ff9a3c', false, Math.sin(t * 12) * 5);
+  const peek = P(t, 0.3, 1.3);
+  s += person({ x: 240, y: 690 - peek * 70, s: 0.95, mood: t > 4.6 ? 'shock' : 'smile', look: t > 3 ? 1 : Math.sin(t * 2), blink: blinkAt(t), aL: 20, aR: 20 });
+  s += bush(240, 690, 1.15, '#2f7a46');
+  s += mark(330, 440, '!', P(t, 4.6, 7), '#ffd54a');
+  return s;
+}, [[4.2, 'splash'], [4.6, 'boing'], [6.1, 'whoosh'], [7.0, 'munch'], [7.6, 'munch'], [8.2, 'munch']]);
+
+// 6. Badang grabs the beard
+scene(10, [[0, 4, 'Badang segera melompat dan menangkap janggut hantu itu!']], t => {
+  let s = sky(...NIGHT, 'sk6') + stars(t) + moon(1080, 110) + hills('#2d5a4a', '#244a3d', 420);
+  s += river(470, 250, t, '#21507f', '#3f78ad');
+  s += `<path d="M 0 470 Q 240 450 420 480 L 420 820 L 0 820 Z" fill="#2f6b45" stroke="#244a3d" stroke-width="5"/>`;
+  const jp = P(t, 0.5, 1.6), caught = t > 1.6;
+  const shake = caught ? Math.sin(t * 25) * 6 * (t < 4 ? 1 : 0.3) : 0;
+  const bx = lerp(200, 520, ease(jp)), by = lerp(600, 600, jp) - Math.sin(jp * Math.PI) * 180;
+  s += `<clipPath id="above6"><rect x="0" y="0" width="${W}" height="600"/></clipPath>`;
+  s += `<g clip-path="url(#above6)">${jin({ x: 760 + shake, y: 600, s: 0.95, t, mood: caught ? 'shock' : 'smile', blink: caught ? 0 : blinkAt(t), beard: caught ? -1.4 : 0, aL: caught ? 160 : 40, aR: caught ? 160 + Math.sin(t * 10) * 15 : 40 })}</g>`;
+  s += person({ x: bx, y: by, s: 0.95, mood: caught ? 'angry' : 'shout', mouthShape: caught ? 'grin' : 'shout', aR: caught ? 75 : 140, aL: caught ? 60 : 140, step: jp > 0 && jp < 1 ? 1 : 0, blink: blinkAt(t) });
+  if (jp > 0 && jp < 1) s += speedLines(t, 0.6);
+  s += mark(820, 320, '!!', P(t, 1.6, 3), '#ffd54a');
+  s += bubble(930, 250, 'Aduh! Lepaskan janggutku!', B(t, 3.5, 6.2), 'down-left', '#e9fffd');
+  s += bubble(930, 250, 'Aku akan tunaikan apa sahaja permintaanmu!', B(t, 6.3, 10), 'down-left', '#e9fffd');
+  return s;
+}, [[0.5, 'whoosh'], [1.6, 'grab'], [1.7, 'boing'], [3.5, 'squeak']]);
+
+// 7. The wish (and the vomit!)
+scene(14, [[6.5, 14, 'Demi menjadi kuat, Badang sanggup memakan muntah hantu itu.']], t => {
+  let s = sky(...NIGHT, 'sk7') + stars(t) + moon(1080, 110) + hills('#2d5a4a', '#244a3d', 420);
+  s += river(470, 250, t, '#21507f', '#3f78ad');
+  s += `<path d="M 0 470 Q 240 450 420 480 L 420 820 L 0 820 Z" fill="#2f6b45" stroke="#244a3d" stroke-width="5"/>`;
+  s += `<clipPath id="above7"><rect x="0" y="0" width="${W}" height="600"/></clipPath>`;
+  const blurp = t > 9 && t < 10.2;
+  s += `<g clip-path="url(#above7)">${jin({ x: 760, y: 600 + Math.sin(t * 2) * 5, s: 0.95, t, mood: t > 3 && t < 6.5 ? 'happy' : 'smile', mouthShape: blurp ? 'shout' : undefined, blink: blinkAt(t, 3), aL: t > 9.8 ? 110 : 30, aR: 30, beard: t < 3 ? -0.8 : 0 })}</g>`;
+  // glowing blob travels from spirit's mouth to Badang
+  const gp = P(t, 9.6, 10.6), eat = P(t, 11, 11.6);
+  if (t > 9.4 && t < 11.6) {
+    const gx = lerp(760, 590, ease(gp)), gy = lerp(470, 430, ease(gp)) - Math.sin(gp * Math.PI) * 50, r = 26 * (1 - eat);
+    s += `<circle cx="${gx}" cy="${gy}" r="${r * 1.8}" fill="#b7ff6a" opacity=".3"/><path d="M ${gx - r} ${gy} Q ${gx - r} ${gy - r * 1.2} ${gx} ${gy - r} Q ${gx + r * 1.3} ${gy - r * 1.1} ${gx + r} ${gy + r * 0.2} Q ${gx + r * 0.4} ${gy + r} ${gx - r * 0.3} ${gy + r * 0.8} Q ${gx - r * 1.1} ${gy + r * 0.6} ${gx - r} ${gy} Z" fill="#8be04e" stroke="#3d7a1c" stroke-width="3"/>`;
+    s += sparkles(gx, gy, t, 5, 40, 3);
+  }
+  const yuck = t > 6.5 && t < 11.6, powered = t > 11.8;
+  const glow = P(t, 11.8, 13);
+  s += person({ x: 500, y: 600, s: 0.95, mood: powered ? 'happy' : yuck ? (t > 10.6 ? 'eyesclosed' : 'worry') : 'smile', mouthShape: yuck ? (t > 10.6 ? 'chew' : 'yuck') : powered ? 'grin' : undefined, tint: yuck && t < 10.6 ? '#7cd34a' : '', aL: powered ? 150 : 20, aR: powered ? 150 : (t < 3 ? 80 : 20), blink: blinkAt(t), glow: glow > 0 ? glow : 0, tilt: yuck ? Math.sin(t * 8) * 4 : 0 });
+  if (powered) s += sparkles(500, 470, t, 12, 160, 5);
+  if (yuck && t < 9.5) s += `<path d="M 430 400 q 10 -12 20 0 q 10 12 20 0" stroke="#5cba3c" stroke-width="4" fill="none" transform="translate(0 ${Math.sin(t * 6) * 4})"/><path d="M 540 390 q 10 -12 20 0 q 10 12 20 0" stroke="#5cba3c" stroke-width="4" fill="none" transform="translate(0 ${Math.cos(t * 6) * 4})"/>`;
+  s += bubble(360, 270, 'Aku mahu jadi kuat... sangat kuat!', B(t, 0.2, 3), 'down-right');
+  s += bubble(930, 250, 'Baiklah! Tapi kamu mesti makan muntahku.', B(t, 3.1, 6.4), 'down-left', '#e9fffd');
+  s += bubble(330, 290, 'Eee... busuknya!', B(t, 6.6, 9.2), 'down-right');
+  return s;
+}, [[3.1, 'blurp'], [6.6, 'yuck'], [9.2, 'blurp'], [11, 'gulp'], [11.8, 'magic']]);
+
+// 8. Super strength
+scene(10, [[0, 10, 'Serta-merta, Badang menjadi sangat kuat! Pokok yang besar pun dapat dicabutnya dengan mudah.']], t => {
+  let s = sky(...DAY, 'sk8') + sun(1150, 100, 42, t) + clouds(t) + hills() + ground(560);
+  s += tree(280, 580, 0.9) + tree(1100, 590, 1) + bush(980, 600, 0.8);
+  const lift = P(t, 1.2, 3), shake = t > 0.6 && t < 1.3 ? Math.sin(t * 50) * 4 : 0;
+  const tx = 640 + shake, ty = lerp(600, 482, ease(lift));
+  s += puff(640, 600, P(t, 1.2, 2.4), 8);
+  if (lift < 1) s += `<ellipse cx="640" cy="600" rx="${80 + lift * 30}" ry="16" fill="#7a5130"/>`;
+  s += g(tree(0, 0, 1.15, Math.sin(t * 6) * (lift > 0.9 ? 3 : 0)) + `<path d="M -14 0 q -20 20 -40 26 M 0 2 q 0 24 -6 40 M 14 0 q 20 18 40 22" stroke="#8a5a33" stroke-width="7" fill="none" stroke-linecap="round" opacity="${lift > 0 ? 1 : 0}"/>`, `translate(${tx} ${ty})`);
+  s += person({ x: 640, y: 640, s: 1, outfit: 'hamba', mood: t > 3 ? 'happy' : 'strain', armLen: lerp(52, 80, ease(lift)), aL: lerp(30, 165, ease(lift)), aR: lerp(30, 165, ease(lift)), glow: 0.5 + 0.2 * Math.sin(t * 4), blink: blinkAt(t), bob: t > 3 ? Math.abs(Math.sin(t * 4)) * 5 : 0 });
+  s += sparkles(640, 400, t, 10, 220, 8);
+  return s;
+}, [[0.6, 'rumble'], [1.3, 'pop'], [3.0, 'ding']]);
+
+// 9. Clearing the forest overnight, then freedom
+scene(12, [[0, 5, 'Dalam satu malam sahaja, Badang menebas seluruh hutan itu!'], [5, 12, 'Tuannya sangat kagum, lalu membebaskan Badang.']], t => {
+  const fast = t < 5;
+  const nightMix = fast ? 0.5 + 0.5 * Math.sin(t * 2.5) : 0;
+  let s = sky(...DAY, 'sk9') + `<rect width="${W}" height="${H + 100}" fill="#14204a" opacity="${nightMix * 0.8}"/>`;
+  s += fast ? `<g transform="rotate(${t * 140} 640 700)">${sun(640, 200, 40, t)}${moon(640, 1200)}</g>` : sun(1150, 100, 42, t);
+  s += hills() + ground(560);
+  if (fast) {
+    for (let i = 0; i < 6; i++) {
+      const tp = P(t, 0.4 + i * 0.7, 1.2 + i * 0.7), x0 = 300 + i * 150;
+      if (tp < 1) s += g(tree(0, 0, 0.8), `translate(${lerp(x0, x0 + 600, tp * tp)} ${560 - Math.sin(tp * Math.PI) * 300}) rotate(${tp * 400})`);
+    }
+    const dash = (t * 1.6) % 2, bx = dash < 1 ? lerp(200, 1080, dash) : lerp(1080, 200, dash - 1);
+    s += person({ x: bx, y: 620, s: 0.85, flip: dash > 1, mood: 'happy', aR: chopArm(t * 3), aL: 60, itemR: parang, step: Math.sin(t * 30), glow: 0.4 });
+    s += speedLines(t, 0.5);
+  } else {
+    s += rumah(250, 580, 0.9);
+    for (let i = 0; i < 6; i++) s += `<ellipse cx="${560 + i * 120}" cy="${600 + (i % 2) * 20}" rx="34" ry="12" fill="#8a5a33" stroke="${OUT}" stroke-width="3"/><ellipse cx="${560 + i * 120}" cy="${596 + (i % 2) * 20}" rx="24" ry="7" fill="#d4a26b"/>`;
+    const tl = t - 5;
+    s += tuan({ x: 470, y: 630, s: 0.9, mood: tl < 2.5 ? 'shock' : 'happy', aL: tl < 2.5 ? 140 : 40, aR: tl < 2.5 ? 140 : 110, blink: blinkAt(t, 1) });
+    s += person({ x: 760, y: 640, s: 0.95, flip: true, mood: tl > 3 ? 'happy' : 'smile', aL: tl > 4.5 ? 160 : 20, aR: tl > 4.5 ? 160 : 20, bob: tl > 4.5 ? Math.abs(Math.sin(t * 6)) * 14 : 0, blink: blinkAt(t) });
+    s += mark(500, 340, '!', P(t, 5.1, 7), '#ff4d4d');
+    s += bubble(430, 260, 'Kamu bebas, Badang! Kamu bukan hamba lagi!', B(t, 7.5, 12), 'down-right');
+    if (tl > 4.5) s += sparkles(760, 470, t, 8, 120, 2);
+  }
+  return s;
+}, [[0.5, 'whoosh'], [1.2, 'whoosh'], [1.9, 'whoosh'], [2.6, 'whoosh'], [3.3, 'whoosh'], [4.0, 'whoosh'], [5.1, 'boing'], [7.5, 'chime'], [9.5, 'cheer']]);
+
+// 10. The King of Singapura
+scene(11, [[0, 5.5, 'Berita tentang kekuatan Badang sampai ke pengetahuan Raja Singapura.'], [5.5, 11, 'Baginda melantik Badang menjadi hulubalang istana.']], t => {
+  let s = sky(...DAY, 'sk10') + clouds(t) + `<rect x="0" y="560" width="${W}" height="160" fill="#e8c98c"/><path d="M 0 560 H ${W}" stroke="#c9a467" stroke-width="6"/>`;
+  s += istana(640, 560, 1);
+  s += palm(80, 580, 0.9, Math.sin(t) * 3) + palm(1200, 590, 0.85, Math.sin(t + 1) * 3);
+  s += `<rect x="700" y="560" width="300" height="34" rx="6" fill="#b02e3a" stroke="${OUT}" stroke-width="3"/>`;
+  s += raja({ x: 850, y: 590, s: 0.95, flip: true, mood: t > 5.5 ? 'happy' : 'smile', aR: t > 5.5 ? 100 : 20, aL: 20, blink: blinkAt(t, 2) });
+  const changed = t > 6.5;
+  const walk = P(t, 0, 2.5);
+  s += person({ x: lerp(100, 480, walk), y: 650, s: 0.95, outfit: changed ? 'hulubalang' : 'hamba', mood: changed ? 'happy' : 'smile', tilt: t > 3 && t < 5.5 ? 14 : 0, step: walk < 1 ? Math.sin(t * 10) : 0, bob: walk < 1 ? Math.abs(Math.sin(t * 10)) * 5 : 0, aL: changed ? 160 : 20, aR: changed ? 160 : 20, blink: blinkAt(t) });
+  s += `<circle cx="480" cy="520" r="${130 * (1 - Math.abs(P(t, 5.8, 7.2) * 2 - 1))}" fill="#fff" opacity="${0.9 * (1 - Math.abs(P(t, 5.8, 7.2) * 2 - 1))}"/>`;
+  if (changed) s += sparkles(480, 480, t, 10, 150, 4) + confetti(t - 6.5, 40);
+  s += bubble(1010, 280, 'Beta lantik kamu menjadi hulubalang!', B(t, 5.6, 9.5), 'down-left', '#fff7d6');
+  return s;
+}, [[0.2, 'step'], [5.6, 'chime'], [6.5, 'magic'], [7.2, 'cheer']]);
+
+// 11. A ship arrives with Nadi Bijaya
+scene(10, [[0, 4.5, 'Pada suatu hari, tibalah sebuah kapal besar dari Benua Keling.'], [4.5, 10, 'Raja Keling menghantar pahlawannya yang paling gagah, Nadi Bijaya, untuk beradu kekuatan.']], t => {
+  let s = sky(...DAY, 'sk11') + sun(160, 110, 40, t) + clouds(t) + `<path d="M 0 380 Q 300 350 640 380 T 1280 370 V 420 H 0 Z" fill="#a7d8a0"/>` + sea(400, t);
+  const sp = P(t, 0, 4.5), sx = lerp(1500, 760, easeOut(sp));
+  s += ship(sx, 560, 0.95, t);
+  s += nadi({ x: sx + 30, y: 520 + Math.sin(t * 2) * 2, s: 0.75, mood: t > 5 ? 'happy' : 'angry', aL: t > 6 ? 150 : 60, aR: t > 6 ? 150 : 60, blink: blinkAt(t, 4) });
+  s += `<path d="M ${sx - 240} 600 Q ${sx} 640 ${sx + 240} 600" stroke="#e6f6ff" stroke-width="6" fill="none" opacity=".8"/>`;
+  s += bubble(sx - 260, 260, 'Akulah yang paling kuat!', B(t, 5.8, 10), 'down-right', '#fff0f0');
+  return s;
+}, [[0.3, 'wave'], [5.8, 'drum']]);
+
+// 12. The stone challenge — Nadi Bijaya tries
+scene(12, [[0, 4, 'Mereka bersetuju: sesiapa yang dapat mengangkat batu besar di hadapan istana, dialah pemenangnya.'], [4, 12, 'Nadi Bijaya mencuba sekuat hati, tetapi batu itu hanya terangkat setakat lututnya.']], t => {
+  let s = sky(...DAY, 'sk12') + clouds(t) + `<rect x="0" y="540" width="${W}" height="280" fill="#e8c98c"/><path d="M 0 540 H ${W}" stroke="#c9a467" stroke-width="6"/>`;
+  s += istana(640, 540, 0.8);
+  for (let i = 0; i < 6; i++) s += villager(i, { x: 90 + i * 70 + (i > 2 ? 730 : 0), y: 570 + (i % 2) * 10, s: 0.55, mood: t > 9.5 ? 'shock' : 'smile', aL: 20, aR: 20, blink: blinkAt(t, i), bob: Math.abs(Math.sin(t * 3 + i)) * 3 });
+  s += raja({ x: 1150, y: 600, s: 0.6, flip: true, blink: blinkAt(t, 2), mood: t > 9.5 ? 'worry' : 'smile' });
+  const tryP = t - 5, up = t > 5 && t < 9.5 ? Math.min(1, tryP / 2) * (0.85 + 0.15 * Math.sin(t * 30)) : 0;
+  const dropped = t > 9.5, shake = up ? Math.sin(t * 40) * 3 : 0;
+  const by = 680 - up * 35;
+  s += nadi({ x: 640 + shake, y: 660, s: 0.95, mood: t > 5 ? (dropped ? 'worry' : 'strain') : 'happy', tint: up > 0.3 ? '#ff4040' : '', aL: t > 4.5 ? 70 : 20, aR: t > 4.5 ? 70 : 20, blink: blinkAt(t, 4), squash: up ? 0.95 : 1 });
+  s += boulder(640, by + (dropped ? 0 : 0), 0.8);
+  if (up) s += sweat(580, 450, t) + sweat(700, 460, t + 0.5);
+  s += puff(640, 650, P(t, 9.5, 10.5), 8);
+  return s;
+}, [[5, 'strain'], [9.5, 'thud'], [9.7, 'gasp']]);
+
+// 13. Badang lifts and throws the stone
+scene(12, [[0, 5.5, 'Kemudian tiba giliran Badang. Dia mengangkat batu itu tinggi ke atas kepalanya...'], [5.5, 12, '...lalu melontarkannya jauh hingga ke kuala Sungai Singapura!']], t => {
+  let s = '';
+  if (t < 6) {
+    s += sky(...DAY, 'sk13') + clouds(t) + `<rect x="0" y="540" width="${W}" height="280" fill="#e8c98c"/><path d="M 0 540 H ${W}" stroke="#c9a467" stroke-width="6"/>`;
+    s += istana(640, 540, 0.8);
+    for (let i = 0; i < 6; i++) s += villager(i, { x: 90 + i * 70 + (i > 2 ? 730 : 0), y: 570 + (i % 2) * 10, s: 0.55, mood: t > 3 ? 'shock' : 'smile', aL: t > 3 ? 150 : 20, aR: t > 3 ? 150 : 20, blink: blinkAt(t, i) });
+    s += nadi({ x: 1080, y: 640, s: 0.7, flip: true, mood: t > 3 ? 'shock' : 'angry', blink: blinkAt(t, 4) });
+    const lift = ease(P(t, 1.5, 3.2)), wind = P(t, 4.8, 5.6);
+    s += boulder(600 - wind * 30, lerp(650, 505, lift) - wind * 20, 0.8, -wind * 15);
+    s += person({ x: 600, y: 660, s: 1, outfit: 'hulubalang', mood: t > 3 ? 'happy' : 'angry', armLen: lerp(52, 76, lift), aL: lerp(40, 168, lift) + wind * 10, aR: lerp(40, 168, lift) + wind * 10, glow: 0.6, tilt: -wind * 10, blink: blinkAt(t) });
+    s += mark(240, 420, '!', P(t, 3, 5), '#ffb23f') + mark(1040, 360, '!!', P(t, 3, 5));
+    if (lift > 0.95) s += sparkles(600, 420, t, 8, 170, 6);
+  } else {
+    // Wide view: stone flies across the sky towards the river mouth.
+    const tl = t - 6, fp = P(tl, 0, 3);
+    s += sky(...DAY, 'sk13b') + sun(1150, 100, 40, t) + clouds(t) + `<path d="M 0 440 Q 300 420 520 450 Q 700 470 760 520 L 760 820 L 0 820 Z" fill="#8bd16f" stroke="#5f9f57" stroke-width="5"/>` +
+      `<path d="M 760 520 Q 900 470 1280 470 V 820 H 760 Z" fill="#2f8fd6"/><path d="M 300 820 Q 420 560 700 540 Q 780 530 900 520 L 1280 520 V 720 Z" fill="#3fa1e3" opacity=".9"/>`;
+    s += istana(140, 450, 0.3);
+    for (let i = 0; i < 6; i++) s += `<path d="M ${820 + i * 80 + Math.sin(t * 2 + i) * 10} ${560 + (i % 3) * 40} q 12 -8 24 0 q 12 8 24 0" stroke="#bfe6ff" stroke-width="4" fill="none"/>`;
+    const sx = lerp(150, 980, fp), sy = lerp(400, 590, fp) - Math.sin(fp * Math.PI) * 330;
+    if (fp < 1) s += `<path d="M 150 400 Q ${lerp(150, 980, fp / 2)} ${400 - 330 * fp * 1.3} ${sx} ${sy}" stroke="#fff" stroke-width="10" stroke-dasharray="4 18" stroke-linecap="round" fill="none" opacity=".8"/>` + boulder(sx, sy, 0.3, fp * 720);
+    else s += boulder(980, 600, 0.3);
+    s += splash(980, 590, P(tl, 3, 4.2), 1.2);
+    s += mark(980, 400, 'PLUSH!', P(tl, 3.1, 6), '#1e88e5');
+  }
+  return s;
+}, [[1.5, 'strain'], [3.2, 'ding'], [3.4, 'gasp'], [5.6, 'whoosh'], [9.0, 'bigsplash'], [9.6, 'cheer']]);
+
+// 14. Victory & the Singapore Stone
+scene(11, [[0, 5.5, 'Nadi Bijaya mengaku kalah dan pulang ke negerinya dengan penuh malu.'], [5.5, 11, 'Batu itu kemudian dikenali sebagai Batu Singapura.']], t => {
+  let s = '';
+  if (t < 5.5) {
+    s += sky(...DAY, 'sk14') + clouds(t) + `<rect x="0" y="540" width="${W}" height="280" fill="#e8c98c"/><path d="M 0 540 H ${W}" stroke="#c9a467" stroke-width="6"/>` + istana(640, 540, 0.8);
+    for (let i = 0; i < 6; i++) s += villager(i, { x: 90 + i * 70 + (i > 2 ? 730 : 0), y: 570 + (i % 2) * 10, s: 0.55, mood: 'happy', aL: 150, aR: 150, bob: Math.abs(Math.sin(t * 6 + i)) * 12 });
+    s += raja({ x: 1150, y: 600, s: 0.6, flip: true, mood: 'happy', aR: 120 });
+    s += person({ x: 560, y: 660, s: 1, outfit: 'hulubalang', mood: 'happy', aL: 160, aR: 70, bob: Math.abs(Math.sin(t * 5)) * 10, glow: 0.3 });
+    s += nadi({ x: 790, y: 660, s: 0.95, flip: true, mood: 'worry', mouthShape: 'smile', tilt: 16, aL: 70, aR: 20, blink: blinkAt(t, 4) });
+    s += confetti(t, 70);
+  } else {
+    const z = 1 + P(t, 5.5, 11) * 0.15;
+    s += g(sky('#ffb27a', '#ffe7b0', 'sk14b') + sun(640, 380, 70, t) + sea(420, t) + `<path d="M 0 470 Q 300 440 560 480 L 560 820 L 0 820 Z" fill="#e8c98c" stroke="#c9a467" stroke-width="5"/>` + boulder(470, 520, 0.75) + palm(130, 520, 1, Math.sin(t) * 3), `translate(640 400) scale(${z}) translate(-640 -400)`);
+    const lp = back(P(t, 6, 6.8));
+    s += g(`<rect x="-190" y="-36" width="380" height="72" rx="36" fill="#fff" stroke="#3b2416" stroke-width="5"/><text x="0" y="14" text-anchor="middle" font-size="40" font-weight="700" fill="#3b2416">Batu Singapura</text>`, `translate(470 300) scale(${lp})`);
+    s += sparkles(470, 470, t, 8, 150, 9);
+  }
+  return s;
+}, [[0.1, 'cheer'], [5.6, 'chime']]);
+
+// 15. Moral & ending
+scene(10, [], t => {
+  let s = sky('#ffe9a8', '#ffd1dc', 'sk15') + `<g opacity=".5">${clouds(t)}</g>` + confetti(t, 30);
+  const cp = back(P(t, 0.2, 1));
+  s += g(`<rect x="-400" y="-150" width="800" height="300" rx="40" fill="#fff" stroke="#3b2416" stroke-width="6"/><rect x="-180" y="-182" width="360" height="64" rx="32" fill="#ff7a59" stroke="#3b2416" stroke-width="5"/><text x="0" y="-138" text-anchor="middle" font-size="38" font-weight="700" fill="#fff">PENGAJARAN</text>
+    <text x="0" y="-40" text-anchor="middle" font-size="36" font-weight="600" fill="#3b2416">⭐ Rajin dan jujur membawa kejayaan.</text>
+    <text x="0" y="30" text-anchor="middle" font-size="36" font-weight="600" fill="#3b2416">⭐ Gunakan kekuatan untuk kebaikan.</text>
+    <text x="0" y="100" text-anchor="middle" font-size="36" font-weight="600" fill="#3b2416">⭐ Jangan sombong dan bongkak.</text>`, `translate(700 250) scale(${cp})`);
+  s += person({ x: 190, y: 640, s: 1, outfit: 'hulubalang', mood: 'happy', aL: 20, aR: 140 + Math.sin(t * 8) * 20, bob: Math.abs(Math.sin(t * 3)) * 6 });
+  const ep = back(P(t, 4.5, 5.3));
+  s += g(`<text x="0" y="0" text-anchor="middle" font-size="110" font-weight="700" fill="#ff5a5a" stroke="#3b2416" stroke-width="10" paint-order="stroke">TAMAT</text><text x="0" y="60" text-anchor="middle" font-size="34" font-weight="600" fill="#3b2416">Terima kasih kerana menonton!</text>`, `translate(760 570) scale(${ep})`);
+  return s;
+}, [[0.2, 'pop'], [4.5, 'chime'], [5, 'cheer']], 0);
+
+// ---------------------------------------------------------------------------
+// Timeline, transitions & rendering
+// ---------------------------------------------------------------------------
+let acc = 0;
+for (const sc of scenes) { sc.start = acc; for (const [ts, name] of sc.sfx) SFX.push([+(acc + ts).toFixed(3), name]); acc += sc.dur; }
+const TOTAL = acc;
+const CAPTIONS = scenes.flatMap(sc => sc.captions.map(([a, b, txt]) => [sc.start + a, sc.start + b, txt]));
+window.TOTAL = TOTAL; window.SFX = SFX; window.CAPTIONS = CAPTIONS;
+
+function iris(r) {
+  return `<path d="M 0 0 H ${W} V ${H} H 0 Z M 640 360 m ${-r} 0 a ${r} ${r} 0 1 0 ${2 * r} 0 a ${r} ${r} 0 1 0 ${-2 * r} 0 Z" fill="#000" fill-rule="evenodd"/>`;
+}
+const defs = `<defs><radialGradient id="auraGrad"><stop offset="0" stop-color="#fff59a" stop-opacity=".9"/><stop offset=".6" stop-color="#ffd54a" stop-opacity=".45"/><stop offset="1" stop-color="#ffd54a" stop-opacity="0"/></radialGradient></defs>`;
+const stage = document.getElementById('stage');
+function renderAt(T) {
+  T = clamp(T, 0, TOTAL - 1e-6);
+  const i = scenes.findIndex(sc => T < sc.start + sc.dur);
+  const sc = scenes[i], t = T - sc.start;
+  let s = defs + g(sc.draw(t), `translate(0 ${-sc.lift})`);
+  for (const [a, b, txt] of sc.captions) if (t >= a && t < b) s += caption(txt, (t - a) / Math.min(1, b - a));
+  // Cartoon iris wipe between scenes
+  const R = 760, tin = 0.45, tout = 0.45;
+  if (i > 0 && t < tin) s += iris(R * easeOut(t / tin));
+  if (i < scenes.length - 1 && t > sc.dur - tout) s += iris(R * (1 - ease((t - (sc.dur - tout)) / tout)));
+  if (i === scenes.length - 1 && t > sc.dur - 1) s += `<rect width="${W}" height="${H + 100}" fill="#000" opacity="${P(t, sc.dur - 1, sc.dur)}"/>`;
+  if (i === 0 && t < 0.5) s += `<rect width="${W}" height="${H + 100}" fill="#000" opacity="${1 - t / 0.5}"/>`;
+  stage.innerHTML = s;
+}
+window.renderAt = renderAt;
+
+// Interactive preview (skipped when the renderer drives the page)
+if (!new URLSearchParams(location.search).has('render')) {
+  document.body.classList.add('preview');
+  const scrub = document.getElementById('scrub'), clock = document.getElementById('clock'), btn = document.getElementById('play');
+  scrub.max = TOTAL;
+  let playing = false, t0 = 0, base = 0;
+  const show = T => { renderAt(T); scrub.value = T; clock.textContent = T.toFixed(1) + 's / ' + TOTAL + 's'; };
+  const loop = now => { if (!playing) return; const T = base + (now - t0) / 1000; if (T >= TOTAL) { playing = false; btn.textContent = '▶ Main'; show(TOTAL); return; } show(T); requestAnimationFrame(loop); };
+  btn.onclick = () => { playing = !playing; btn.textContent = playing ? '❚❚ Jeda' : '▶ Main'; if (playing) { base = +scrub.value >= TOTAL - 0.1 ? 0 : +scrub.value; t0 = performance.now(); requestAnimationFrame(loop); } };
+  scrub.oninput = () => { playing = false; btn.textContent = '▶ Main'; show(+scrub.value); };
+  const at = +new URLSearchParams(location.search).get('t') || 0;
+  document.fonts.ready.then(() => show(at));
+}
+</script>
+</body>
+</html>
