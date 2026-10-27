@@ -3,6 +3,7 @@
 //   node render.mjs frames out.mp4 [fps]        -> silent video
 //   node render.mjs stills outdir t1 t2 ...     -> PNG stills at given times
 //   node render.mjs meta meta.json              -> timeline (duration, sfx, captions)
+//   node render.mjs thumb thumbnail.png         -> YouTube thumbnail
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -28,6 +29,9 @@ if (mode === 'meta') {
     await page.evaluate(t => window.renderAt(t), +t);
     await stage.screenshot({ path: path.join(out, `t${String(t).padStart(6, '0')}.png`) });
   }
+} else if (mode === 'thumb') {
+  await page.evaluate(() => window.renderThumbnail());
+  await stage.screenshot({ path: out });
 } else if (mode === 'frames') {
   const fps = +(rest[0] || 24);
   const total = await page.evaluate(() => window.TOTAL);
