@@ -7,6 +7,17 @@ heroImage: "/blog-placeholder-2.jpg"
 
 Belajar huruf ABC ialah langkah pertama sebelum anak-anak pandai membaca. Video di bawah membantu kanak-kanak mengenal dan mengeja huruf A hingga Z dengan cara yang menyeronokkan.
 
+## Kartun ABC: A untuk Ayam hingga Z untuk Zirafah
+
+Tekan butang main dan hidupkan bunyi. Setiap huruf disebut, kemudian perkataannya dieja satu per satu: *A untuk Ayam — A, Y, A, M — Ayam!*
+
+<video controls preload="metadata" playsinline style="width: 100%; border-radius: 8px;">
+	<source src="/videos/belajar-abc-kartun.mp4" type="video/mp4" />
+	Pelayar anda tidak menyokong video. <a href="/videos/belajar-abc-kartun.mp4">Muat turun video</a>.
+</video>
+
+## Video YouTube
+
 <div style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; border-radius: 8px;">
 	<iframe
 		src="https://www.youtube-nocookie.com/embed/sPn5M2OCNVA"
